@@ -30,8 +30,16 @@ exports.handler = async (event) => {
       return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'Missing required fields' }) };
     }
 
+    console.log('stripe-checkout received:', {
+      jobId,
+      jobIdType: typeof jobId,
+      supabaseProject: (process.env.SUPABASE_URL || 'MISSING').replace(/^https:\/\//, '').split('.')[0],
+      serviceKeyPrefix: (process.env.SUPABASE_SERVICE_KEY || 'MISSING').slice(0, 14),
+    });
+
     const { data: job, error } = await supabase.from('jobs').select('*').eq('id', jobId).single();
     if (error || !job) {
+      console.error('stripe-checkout job lookup failed:', JSON.stringify({ jobId, error, job }));
       return { statusCode: 404, headers: corsHeaders, body: JSON.stringify({ error: 'Job not found' }) };
     }
 
