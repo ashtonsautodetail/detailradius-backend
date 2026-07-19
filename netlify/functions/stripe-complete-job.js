@@ -9,19 +9,28 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 
 const PLATFORM_CUT = 0.10;
 
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+};
+
 async function chargeIdFromPaymentIntent(paymentIntentId) {
   const pi = await stripe.paymentIntents.retrieve(paymentIntentId);
   return pi.latest_charge;
 }
 
 exports.handler = async (event) => {
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 204, headers: corsHeaders, body: '' };
+  }
   if (event.httpMethod !== 'POST') {
-    return { statusCode: 405, body: JSON.stringify({ error: 'Method not allowed' }) };
+    return { statusCode: 405, headers: corsHeaders, body: JSON.stringify({ error: 'Method not allowed' }) };
   }
 
   try {
     const { jobId } = JSON.parse(event.body);
-    if (!jobId) return { statusCode: 400, body: JSON.stringify({ error: 'Missing jobId' }) };
+    if (!jobId) return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'Missing jobId' }) };
 
     const { data: job, error } = await supabase
       .from('jobs')
@@ -29,16 +38,16 @@ exports.handler = async (event) => {
       .eq('id', jobId)
       .single();
 
-    if (error || !job) return { statusCode: 404, body: JSON.stringify({ error: 'Job not found' }) };
+    if (error || !job) return { statusCode: 404, headers: corsHeaders, body: JSON.stringify({ error: 'Job not found' }) };
 
     const accountId = job.detailers && job.detailers.stripe_account_id;
     if (!accountId) {
-      return { statusCode: 400, body: JSON.stringify({ error: 'This detailer has not connected payouts yet' }) };
+      return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'This detailer has not connected payouts yet' }) };
     }
 
     const remainderDue = job.price - (job.deposit_amount || 0);
     if (remainderDue > 0 && job.payment_status !== 'fully_paid') {
-      return { statusCode: 400, body: JSON.stringify({ error: 'The customer still owes a balance on this job — collect that before completing it' }) };
+      return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'The customer still owes a balance on this job — collect that before completing it' }) };
     }
 
     const transferIds = [];
@@ -76,12 +85,12 @@ exports.handler = async (event) => {
       .eq('id', jobId);
 
     if (updateErr) {
-      return { statusCode: 500, body: JSON.stringify({ error: 'Transfer succeeded but failed to update job status: ' + updateErr.message, transferIds }) };
+      return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error: 'Transfer succeeded but failed to update job status: ' + updateErr.message, transferIds }) };
     }
 
-    return { statusCode: 200, body: JSON.stringify({ success: true, transferIds }) };
+    return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ success: true, transferIds }) };
   } catch (err) {
     console.error('stripe-complete-job error:', err);
-    return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
+    return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error: err.message }) };
   }
 };

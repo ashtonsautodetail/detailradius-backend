@@ -5,15 +5,27 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
+// Needed because the main site (serene-cupcake-...netlify.app) and this backend
+// (detailradius-backend.netlify.app) are different origins — without these
+// headers the browser blocks the response before your JS ever sees it.
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+};
+
 exports.handler = async (event) => {
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 204, headers: corsHeaders, body: '' };
+  }
   if (event.httpMethod !== 'POST') {
-    return { statusCode: 405, body: JSON.stringify({ error: 'Method not allowed' }) };
+    return { statusCode: 405, headers: corsHeaders, body: JSON.stringify({ error: 'Method not allowed' }) };
   }
 
   try {
     const { detailerId, returnUrl } = JSON.parse(event.body);
     if (!detailerId || !returnUrl) {
-      return { statusCode: 400, body: JSON.stringify({ error: 'Missing detailerId or returnUrl' }) };
+      return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'Missing detailerId or returnUrl' }) };
     }
 
     const { data: detailer, error: fetchErr } = await supabase
@@ -23,7 +35,7 @@ exports.handler = async (event) => {
       .single();
 
     if (fetchErr || !detailer) {
-      return { statusCode: 404, body: JSON.stringify({ error: 'Detailer not found' }) };
+      return { statusCode: 404, headers: corsHeaders, body: JSON.stringify({ error: 'Detailer not found' }) };
     }
 
     let accountId = detailer.stripe_account_id;
@@ -50,7 +62,7 @@ exports.handler = async (event) => {
         .eq('id', detailerId);
 
       if (updateErr) {
-        return { statusCode: 500, body: JSON.stringify({ error: 'Account created but failed to save: ' + updateErr.message }) };
+        return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error: 'Account created but failed to save: ' + updateErr.message }) };
       }
     }
 
@@ -62,9 +74,9 @@ exports.handler = async (event) => {
       type: 'account_onboarding',
     });
 
-    return { statusCode: 200, body: JSON.stringify({ url: accountLink.url }) };
+    return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ url: accountLink.url }) };
   } catch (err) {
     console.error('stripe-connect-account error:', err);
-    return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
+    return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error: err.message }) };
   }
 };
