@@ -94,6 +94,37 @@ exports.handler = async (event) => {
           console.error('Failed to record payment for job', jobId, error.message);
           return { statusCode: 500, body: JSON.stringify({ error: 'db write failed' }) };
         }
+
+        // Best-effort "money received" email to the detailer (dormant without RESEND_API_KEY;
+        // wrapped so notification problems can never break payment recording).
+        if (process.env.RESEND_API_KEY) {
+          try {
+            let detailerEmail = null;
+            const { data: fullJob } = await supabase.from('jobs').select('service, customer, detailer_id').eq('id', jobId).single();
+            if (fullJob && fullJob.detailer_id) {
+              const { data: det } = await supabase.from('detailers').select('user_id').eq('id', fullJob.detailer_id).single();
+              if (det && det.user_id) {
+                const { data: u } = await supabase.auth.admin.getUserById(det.user_id);
+                detailerEmail = u?.user?.email || null;
+              }
+            }
+            if (detailerEmail) {
+              const label = paymentType === 'deposit' ? 'Deposit paid' : 'Final balance paid';
+              await fetch('https://api.resend.com/emails', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  from: process.env.NOTIFY_FROM || 'DetailRadius <onboarding@resend.dev>',
+                  to: detailerEmail,
+                  subject: `💵 ${label} — ${fullJob.service || 'job'} for ${fullJob.customer || 'customer'}`,
+                  html: `<h2>${label} ✅</h2><p>$${(session.amount_total / 100).toFixed(2)} was just paid through DetailRadius. Open your dashboard for details.</p>`,
+                }),
+              });
+            }
+          } catch (mailErr) {
+            console.error('deposit email failed (non-fatal):', mailErr.message);
+          }
+        }
       }
     }
   }

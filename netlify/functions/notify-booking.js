@@ -1,25 +1,22 @@
 // netlify/functions/notify-booking.js
-// Sends a booking notification to the detailer and a confirmation to the customer.
+// Sends booking notifications (detailer + customer) and fleet-inquiry alerts (owner).
 // DORMANT until RESEND_API_KEY is set in Netlify env — until then it no-ops gracefully
-// (returns 200 {skipped:true}) so the booking flow is never blocked by notifications.
-//
-// Wiring (added to the frontend once its source is in a repo):
-//   after a job row is created, POST { jobId } to /.netlify/functions/notify-booking
-//
-// Detailer email: detailers has no email column, so we look it up from auth.users via
-// detailers.user_id using the service role (admin).
+// (returns 200 {skipped:true}) so no flow is ever blocked by notifications.
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY;               // <-- set in Netlify to activate
 const FROM = process.env.NOTIFY_FROM || 'DetailRadius <onboarding@resend.dev>'; // replace w/ verified domain
 const SITE_URL = process.env.SITE_URL || 'https://serene-cupcake-78a254.netlify.app';
+const OWNER_EMAIL = process.env.OWNER_EMAIL || 'ashtons.autodetail4@gmail.com';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'Content-Type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
+
+const esc = (s) => String(s == null ? '' : s).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
 
 async function sendEmail(to, subject, html) {
   if (!to) return;
@@ -37,13 +34,32 @@ exports.handler = async (event) => {
     return { statusCode: 405, headers: corsHeaders, body: JSON.stringify({ error: 'Method not allowed' }) };
   }
   try {
-    const { jobId } = JSON.parse(event.body || '{}');
-    if (!jobId) return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'Missing jobId' }) };
+    const body = JSON.parse(event.body || '{}');
 
-    // Dormant until a provider key is configured — never block the booking.
+    // Dormant until a provider key is configured — never block the calling flow.
     if (!RESEND_API_KEY) {
       return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ skipped: true, reason: 'RESEND_API_KEY not set' }) };
     }
+
+    // ---- Fleet/B2B inquiry alert → owner ----
+    if (body.type === 'fleet') {
+      await sendEmail(OWNER_EMAIL,
+        `🚚 Fleet inquiry — ${body.company || 'Unknown company'} (${body.fleetSize || '?'})`,
+        `<h2>New fleet inquiry</h2>
+         <ul>
+           <li><strong>Company:</strong> ${esc(body.company)}</li>
+           <li><strong>Email:</strong> ${esc(body.email)}</li>
+           <li><strong>Fleet size:</strong> ${esc(body.fleetSize)}</li>
+           <li><strong>City:</strong> ${esc(body.city)}</li>
+           <li><strong>Message:</strong> ${esc(body.message)}</li>
+         </ul>
+         <p>Reply same-day — fleet contracts are the big fish. Full details in the Owner tab.</p>`);
+      return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ sent: true }) };
+    }
+
+    // ---- Booking notification (default) ----
+    const jobId = body.jobId;
+    if (!jobId) return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'Missing jobId' }) };
 
     const { data: job, error } = await supabase.from('jobs').select('*').eq('id', jobId).single();
     if (error || !job) return { statusCode: 404, headers: corsHeaders, body: JSON.stringify({ error: 'Job not found' }) };
@@ -63,12 +79,13 @@ exports.handler = async (event) => {
 
     const summary = `
       <ul>
-        <li><strong>Service:</strong> ${job.service || ''}</li>
-        <li><strong>Vehicle:</strong> ${job.vehicle || ''}</li>
-        <li><strong>Date:</strong> ${job.date || ''} ${job.requested_time || ''}</li>
-        <li><strong>Location:</strong> ${job.service_location_type || ''} ${job.service_address || ''}</li>
+        <li><strong>Service:</strong> ${esc(job.service)}</li>
+        <li><strong>Vehicle:</strong> ${esc(job.vehicle)}</li>
+        <li><strong>Date:</strong> ${esc(job.date)} ${esc(job.requested_time)}</li>
+        <li><strong>Location:</strong> ${esc(job.service_location_type)} ${esc(job.service_address)}</li>
         <li><strong>Price:</strong> $${job.price ?? ''}</li>
-        <li><strong>Customer:</strong> ${job.customer || ''} (${job.customer_email || 'no email'})</li>
+        <li><strong>Customer:</strong> ${esc(job.customer)} (${esc(job.customer_email) || 'no email'})</li>
+        ${job.referral_code ? `<li><strong>🎁 Referral code:</strong> ${esc(job.referral_code)} — honor $10 off the final balance</li>` : ''}
       </ul>`;
 
     // Notify detailer
@@ -80,7 +97,7 @@ exports.handler = async (event) => {
     // Confirm to customer
     await sendEmail(job.customer_email,
       `Your DetailRadius booking request`,
-      `<h2>Booking received ✅</h2><p>${detailerName} will confirm shortly.</p>${summary}`);
+      `<h2>Booking received ✅</h2><p>${esc(detailerName)} will confirm shortly.</p>${summary}`);
 
     return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ sent: true, detailerEmailed: !!detailerEmail }) };
   } catch (err) {
