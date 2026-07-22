@@ -18,6 +18,37 @@ exports.handler = async (event) => {
     return { statusCode: 400, body: `Webhook Error: ${err.message}` };
   }
 
+  // ---- DetailRadius Pro subscription lifecycle ----
+  if (stripeEvent.type === 'checkout.session.completed') {
+    const s = stripeEvent.data.object;
+    if (s.mode === 'subscription' && s.metadata && s.metadata.type === 'pro' && s.metadata.detailerId) {
+      const { error } = await supabase
+        .from('detailers')
+        .update({ pro: true, pro_sub_id: s.subscription || null })
+        .eq('id', s.metadata.detailerId);
+      if (error) {
+        console.error('Webhook: failed to activate Pro for detailer', s.metadata.detailerId, error.message);
+        return { statusCode: 500, body: JSON.stringify({ error: 'pro activate failed' }) };
+      }
+      return { statusCode: 200, body: JSON.stringify({ received: true, pro: 'activated' }) };
+    }
+  }
+  if (stripeEvent.type === 'customer.subscription.deleted') {
+    const sub = stripeEvent.data.object;
+    const detailerId = sub.metadata && sub.metadata.detailerId;
+    if (detailerId) {
+      const { error } = await supabase
+        .from('detailers')
+        .update({ pro: false, pro_sub_id: null })
+        .eq('id', detailerId);
+      if (error) {
+        console.error('Webhook: failed to deactivate Pro for detailer', detailerId, error.message);
+        return { statusCode: 500, body: JSON.stringify({ error: 'pro deactivate failed' }) };
+      }
+    }
+    return { statusCode: 200, body: JSON.stringify({ received: true, pro: 'deactivated' }) };
+  }
+
   if (stripeEvent.type === 'checkout.session.completed') {
     const session = stripeEvent.data.object;
     const jobId = session.metadata && session.metadata.job_id;
