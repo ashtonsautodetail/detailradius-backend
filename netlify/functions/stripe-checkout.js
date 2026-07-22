@@ -46,6 +46,11 @@ exports.handler = async (event) => {
       amountCents = depositDollars * 100;
       description = `Deposit — ${job.service} (${job.vehicle})`;
     } else if (type === 'remainder') {
+      // Don't let a second remainder checkout be created once the job is paid off
+      // (or already transferred) — that would double-charge the customer.
+      if (job.payment_status === 'fully_paid' || job.payment_status === 'transferred') {
+        return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'This job is already paid in full' }) };
+      }
       const remainderDollars = job.price - (job.deposit_amount || 0);
       if (remainderDollars <= 0) {
         return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'No balance due on this job' }) };

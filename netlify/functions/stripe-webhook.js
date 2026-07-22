@@ -23,20 +23,47 @@ exports.handler = async (event) => {
     const jobId = session.metadata && session.metadata.job_id;
     const paymentType = session.metadata && session.metadata.payment_type;
 
-    if (jobId && paymentType === 'deposit') {
-      const depositDollars = session.amount_total / 100;
-      const { error } = await supabase.from('jobs').update({
-        payment_status: 'deposit_paid',
-        deposit_amount: depositDollars,
-        deposit_charge_id: session.payment_intent,
-      }).eq('id', jobId);
-      if (error) console.error('Failed to record deposit payment:', error);
-    } else if (jobId && paymentType === 'remainder') {
-      const { error } = await supabase.from('jobs').update({
-        payment_status: 'fully_paid',
-        remainder_charge_id: session.payment_intent,
-      }).eq('id', jobId);
-      if (error) console.error('Failed to record remainder payment:', error);
+    if (jobId && (paymentType === 'deposit' || paymentType === 'remainder')) {
+      // Read the current row so out-of-order or duplicate deliveries can't move the
+      // job backwards (e.g. a late deposit event overwriting an already-paid-off or
+      // already-transferred job).
+      const { data: job, error: readErr } = await supabase
+        .from('jobs').select('payment_status').eq('id', jobId).single();
+
+      if (readErr || !job) {
+        // Can't find the job (or a transient read error) — return non-2xx so Stripe
+        // retries later rather than silently dropping a real payment.
+        console.error('Webhook: job lookup failed for', jobId, readErr && readErr.message);
+        return { statusCode: 500, body: JSON.stringify({ error: 'job lookup failed' }) };
+      }
+
+      // Money has already left the platform for this job — nothing to record.
+      if (job.payment_status === 'transferred') {
+        return { statusCode: 200, body: JSON.stringify({ received: true, ignored: 'already transferred' }) };
+      }
+
+      let update = null;
+      if (paymentType === 'deposit' && job.payment_status !== 'fully_paid') {
+        update = {
+          payment_status: 'deposit_paid',
+          deposit_amount: session.amount_total / 100,
+          deposit_charge_id: session.payment_intent,
+        };
+      } else if (paymentType === 'remainder') {
+        update = {
+          payment_status: 'fully_paid',
+          remainder_charge_id: session.payment_intent,
+        };
+      }
+
+      if (update) {
+        const { error } = await supabase.from('jobs').update(update).eq('id', jobId);
+        if (error) {
+          // Return non-2xx so Stripe re-delivers — never lose a payment to a transient write.
+          console.error('Failed to record payment for job', jobId, error.message);
+          return { statusCode: 500, body: JSON.stringify({ error: 'db write failed' }) };
+        }
+      }
     }
   }
 

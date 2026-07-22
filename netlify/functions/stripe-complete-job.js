@@ -40,6 +40,14 @@ exports.handler = async (event) => {
 
     if (error || !job) return { statusCode: 404, headers: corsHeaders, body: JSON.stringify({ error: 'Job not found' }) };
 
+    // IDEMPOTENCY GUARD (money-safety): if this job has already paid out, never run
+    // the transfers again. Without this, a double-click or a retry would attempt to
+    // pay the detailer a second time. Combined with the idempotency keys below, a
+    // payout for a given job can happen at most once.
+    if (job.payment_status === 'transferred') {
+      return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ success: true, alreadyCompleted: true, transferIds: [] }) };
+    }
+
     const accountId = job.detailers && job.detailers.stripe_account_id;
     if (!accountId) {
       return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'This detailer has not connected payouts yet' }) };
@@ -50,24 +58,35 @@ exports.handler = async (event) => {
       return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'The customer still owes a balance on this job — collect that before completing it' }) };
     }
 
+    // Nothing was ever collected — refuse rather than transfer $0 / from the wrong balance.
+    if (!job.deposit_charge_id && !job.remainder_charge_id) {
+      return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'No payment has been collected for this job yet' }) };
+    }
+
     const transferIds = [];
 
     if (job.deposit_charge_id) {
       const chargeId = await chargeIdFromPaymentIntent(job.deposit_charge_id);
-      const amount = Math.round(job.deposit_amount * 100 * (1 - PLATFORM_CUT));
+      if (!chargeId) {
+        return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'Deposit payment has not settled yet — try again shortly' }) };
+      }
+      const amount = Math.round((job.deposit_amount || 0) * 100 * (1 - PLATFORM_CUT));
       const t = await stripe.transfers.create({
         amount,
         currency: 'usd',
         destination: accountId,
         source_transaction: chargeId,
         transfer_group: `job_${jobId}`,
-      });
+      }, { idempotencyKey: `transfer_job_${jobId}_deposit` });
       transferIds.push(t.id);
     }
 
     if (job.remainder_charge_id) {
       const chargeId = await chargeIdFromPaymentIntent(job.remainder_charge_id);
-      const remainderDollars = job.price - job.deposit_amount;
+      if (!chargeId) {
+        return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'Balance payment has not settled yet — try again shortly' }) };
+      }
+      const remainderDollars = job.price - (job.deposit_amount || 0);
       const amount = Math.round(remainderDollars * 100 * (1 - PLATFORM_CUT));
       const t = await stripe.transfers.create({
         amount,
@@ -75,7 +94,7 @@ exports.handler = async (event) => {
         destination: accountId,
         source_transaction: chargeId,
         transfer_group: `job_${jobId}`,
-      });
+      }, { idempotencyKey: `transfer_job_${jobId}_remainder` });
       transferIds.push(t.id);
     }
 

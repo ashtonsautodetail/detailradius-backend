@@ -77,6 +77,26 @@ exports.handler = async (event) => {
     return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ url: accountLink.url }) };
   } catch (err) {
     console.error('stripe-connect-account error:', err);
-    return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error: err.message }) };
+
+    // Translate the most common (and most confusing) Stripe error into a clear,
+    // actionable message. If Connect isn't enabled on the *platform* account,
+    // stripe.accounts.create throws a StripeInvalidRequestError mentioning Connect
+    // signup — a one-time setup the platform owner does in the Stripe dashboard.
+    const raw = (err && err.message) || 'Unknown error';
+    const looksLikeConnectNotEnabled =
+      /connect/i.test(raw) && /(sign(ed)?\s*up|platform|enable|only)/i.test(raw);
+
+    if (looksLikeConnectNotEnabled) {
+      return {
+        statusCode: 400,
+        headers: corsHeaders,
+        body: JSON.stringify({
+          error: 'Payouts aren’t switched on for DetailRadius yet. This is a one-time platform setup — please try again shortly.',
+          code: 'connect_not_enabled',
+        }),
+      };
+    }
+
+    return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error: raw, code: 'stripe_error' }) };
   }
 };
