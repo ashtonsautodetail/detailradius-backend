@@ -1,8 +1,8 @@
 // Runs when a detailer marks a job "Complete." This is the only place money
 // actually leaves the platform's Stripe balance. It transfers 95% (97% for Pro) of every
 // charge collected for this job (deposit, and remainder if there was one) to
-// the detailer's connected account. The other 10% simply stays behind —
-// that's the platform fee. Refuses to run if a balance is still owed.
+// the detailer's connected account. The remainder stays behind — that's the
+// platform fee (0% for founding detailers on their first 10 jobs). Refuses to run if a balance is still owed.
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
@@ -37,7 +37,7 @@ exports.handler = async (event) => {
 
     const { data: job, error } = await supabase
       .from('jobs')
-      .select('*, detailers(stripe_account_id, pro)')
+      .select('*, detailers(stripe_account_id, pro, founding)')
       .eq('id', jobId)
       .single();
 
@@ -67,7 +67,19 @@ exports.handler = async (event) => {
     }
 
     // Pro members pay the lower platform fee.
-    const PLATFORM_CUT = (job.detailers && job.detailers.pro) ? FEE_PRO : FEE_FREE;
+    let PLATFORM_CUT = (job.detailers && job.detailers.pro) ? FEE_PRO : FEE_FREE;
+
+    // FOUNDING DETAILER OFFER: 0% platform fee on the first 10 completed jobs.
+    // The flag is set manually (detailers.founding) when Ashton approves a founding
+    // spot. Count prior completed payouts; this job qualifies if fewer than 10 exist.
+    if (job.detailers && job.detailers.founding) {
+      const { count } = await supabase
+        .from('jobs')
+        .select('id', { count: 'exact', head: true })
+        .eq('detailer_id', job.detailer_id)
+        .eq('payment_status', 'transferred');
+      if ((count || 0) < 10) PLATFORM_CUT = 0;
+    }
 
     const transferIds = [];
 
