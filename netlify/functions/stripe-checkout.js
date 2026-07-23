@@ -36,7 +36,7 @@ exports.handler = async (event) => {
       return { statusCode: 404, headers: corsHeaders, body: JSON.stringify({ error: 'Job not found' }) };
     }
 
-    let amountCents, description;
+    let amountCents, description, tipCents = 0;
 
     if (type === 'deposit') {
       if (job.payment_status && job.payment_status !== 'pending_deposit') {
@@ -57,21 +57,37 @@ exports.handler = async (event) => {
       }
       amountCents = remainderDollars * 100;
       description = `Balance due — ${job.service} (${job.vehicle})`;
+      // Optional tip chosen by the customer (jobs.tip_amount, written by the
+      // frontend right before this call). Tips ride as their own line item and
+      // are transferred to the detailer at 100% — no platform fee on tips.
+      tipCents = Math.round((parseFloat(job.tip_amount) || 0) * 100);
+      if (tipCents < 0 || tipCents > 50000) tipCents = 0; // sanity: $0–$500
     } else {
       return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'type must be "deposit" or "remainder"' }) };
     }
 
+    const lineItems = [{
+      price_data: {
+        currency: 'usd',
+        product_data: { name: description },
+        unit_amount: amountCents,
+      },
+      quantity: 1,
+    }];
+    if (typeof tipCents === 'number' && tipCents > 0) {
+      lineItems.push({
+        price_data: {
+          currency: 'usd',
+          product_data: { name: 'Tip for your detailer (they keep 100%)' },
+          unit_amount: tipCents,
+        },
+        quantity: 1,
+      });
+    }
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       payment_method_types: ['card'],
-      line_items: [{
-        price_data: {
-          currency: 'usd',
-          product_data: { name: description },
-          unit_amount: amountCents,
-        },
-        quantity: 1,
-      }],
+      line_items: lineItems,
       payment_intent_data: {
         transfer_group: `job_${jobId}`,
         metadata: { job_id: String(jobId), payment_type: type },

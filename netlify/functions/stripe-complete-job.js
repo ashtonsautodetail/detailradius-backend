@@ -105,7 +105,10 @@ exports.handler = async (event) => {
         return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'Balance payment has not settled yet — try again shortly' }) };
       }
       const remainderDollars = job.price - (job.deposit_amount || 0);
-      const amount = Math.round(remainderDollars * 100 * (1 - PLATFORM_CUT));
+      // Tip (if any) was collected on this same charge — it passes through at
+      // 100%; the platform fee only ever applies to the service price.
+      const tipCents = Math.max(0, Math.round((parseFloat(job.tip_amount) || 0) * 100));
+      const amount = Math.round(remainderDollars * 100 * (1 - PLATFORM_CUT)) + tipCents;
       const t = await stripe.transfers.create({
         amount,
         currency: 'usd',
