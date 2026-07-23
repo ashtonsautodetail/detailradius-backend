@@ -1,5 +1,5 @@
 // Runs when a detailer marks a job "Complete." This is the only place money
-// actually leaves the platform's Stripe balance. It transfers 90% of every
+// actually leaves the platform's Stripe balance. It transfers 95% (97% for Pro) of every
 // charge collected for this job (deposit, and remainder if there was one) to
 // the detailer's connected account. The other 10% simply stays behind —
 // that's the platform fee. Refuses to run if a balance is still owed.
@@ -7,7 +7,10 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
-const PLATFORM_CUT = 0.10;
+// Plan-based platform fee: free detailers keep 95%, Pro members keep 97%.
+// Overridable via env so the rates can change without a code deploy.
+const FEE_FREE = parseFloat(process.env.PLATFORM_FEE_FREE || '0.05');
+const FEE_PRO = parseFloat(process.env.PLATFORM_FEE_PRO || '0.03');
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -34,7 +37,7 @@ exports.handler = async (event) => {
 
     const { data: job, error } = await supabase
       .from('jobs')
-      .select('*, detailers(stripe_account_id)')
+      .select('*, detailers(stripe_account_id, pro)')
       .eq('id', jobId)
       .single();
 
@@ -62,6 +65,9 @@ exports.handler = async (event) => {
     if (!job.deposit_charge_id && !job.remainder_charge_id) {
       return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'No payment has been collected for this job yet' }) };
     }
+
+    // Pro members pay the lower platform fee.
+    const PLATFORM_CUT = (job.detailers && job.detailers.pro) ? FEE_PRO : FEE_FREE;
 
     const transferIds = [];
 
