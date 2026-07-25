@@ -153,6 +153,17 @@ function ok(cond, msg) { (cond ? (pass++, console.log('  ✓ ' + msg)) : (fail++
   ok(state.transfers[0].args.amount === net(5500, 0.05), 'deposit transfer untouched by tip');
   ok(state.transfers[1].args.amount === net(16500, 0.05) + 2000, 'remainder = detailer share of balance + 100% of $20 tip (tip never touched by fees)');
 
+  console.log('\n[complete-job] CASH BALANCE -> completes on deposit only, deposit share transfers');
+  reset({ id: 31, price: 220, deposit_amount: 55, deposit_charge_id: 'pi_d', remainder_charge_id: null, payment_status: 'deposit_paid', _acct: 'acct_1', balance_method: 'cash' });
+  r = await complete.handler(ev({ jobId: 31 }));
+  ok(r.statusCode === 200, 'completes with unpaid balance when cash was chosen');
+  ok(state.transfers.length === 1 && state.transfers[0].args.amount === net(5500, 0.05), 'transfers deposit share only (cash stays with detailer)');
+
+  console.log('\n[complete-job] card balance still required when NOT cash');
+  reset({ id: 32, price: 220, deposit_amount: 55, deposit_charge_id: 'pi_d', remainder_charge_id: null, payment_status: 'deposit_paid', _acct: 'acct_1' });
+  r = await complete.handler(ev({ jobId: 32 }));
+  ok(r.statusCode === 400, 'still refuses unpaid card balance');
+
   console.log('\n[complete-job] PRO non-founding -> 97%');
   reset({ id: 22, price: 55, deposit_amount: 55, deposit_charge_id: 'pi_d', remainder_charge_id: null, payment_status: 'deposit_paid', _acct: 'acct_1', _pro: true });
   r = await complete.handler(ev({ jobId: 22 }));
