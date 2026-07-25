@@ -7,7 +7,7 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY;               // <-- set in Netlify to activate
 const FROM = process.env.NOTIFY_FROM || 'DetailRadius <onboarding@resend.dev>'; // replace w/ verified domain
-const SITE_URL = process.env.SITE_URL || 'https://serene-cupcake-78a254.netlify.app';
+const SITE_URL = process.env.SITE_URL || 'https://detailradius.com';
 const OWNER_EMAIL = process.env.OWNER_EMAIL || 'ashtons.autodetail4@gmail.com';
 
 const corsHeaders = {

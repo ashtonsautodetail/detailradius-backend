@@ -5,7 +5,7 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
-// Needed because the main site (serene-cupcake-...netlify.app) and this backend
+// Needed because the main site (detailradius.com) and this backend
 // (detailradius-backend.netlify.app) are different origins — without these
 // headers the browser blocks the response before your JS ever sees it.
 const corsHeaders = {
