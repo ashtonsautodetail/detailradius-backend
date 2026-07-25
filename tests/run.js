@@ -36,7 +36,8 @@ function makeQuery(table) {
     _table: table,
     select() { return q; },
     eq() { return q; },
-    async single() { return { data: state.job ? { ...state.job, detailers: { stripe_account_id: state.job._acct } } : null, error: state.job ? null : { message: 'no row' } }; },
+    async single() { return { data: state.job ? { ...state.job, detailers: { stripe_account_id: state.job._acct, pro: !!state.job._pro, founding: !!state.job._founding } } : null, error: state.job ? null : { message: 'no row' } }; },
+    then(res) { return Promise.resolve({ data: [], count: state.completedCount || 0, error: null }).then(res); },
     update(u) { q._update = u; return { eq: async () => { state.updates.push(u); return { error: state.dbWriteError ? { message: 'write fail' } : null }; } }; },
   };
   return q;
@@ -55,7 +56,10 @@ process.env.STRIPE_SECRET_KEY = 'sk_test';
 process.env.SUPABASE_URL = 'http://x'; process.env.SUPABASE_SERVICE_KEY = 'k';
 process.env.STRIPE_WEBHOOK_SECRET = 'whsec';
 
-const FN = path.join(__dirname, '..', 'netlify', 'functions');
+const FN = require('path').join(__dirname, '..', 'netlify', 'functions');
+// Detailer net for one charge: platform cut + card-processing pass-through at
+// cost (2.9% + 30c, matching stripe-complete-job.js). Tips excluded by callers.
+const net = (cents, cut) => Math.max(0, Math.round(cents * (1 - cut)) - (Math.round(cents * 0.029) + 30));
 function fresh(p) { delete require.cache[require.resolve(p)]; return require(p); }
 
 function ev(body, extra) { return Object.assign({ httpMethod: 'POST', body: JSON.stringify(body), headers: {} }, extra || {}); }
@@ -92,8 +96,8 @@ function ok(cond, msg) { (cond ? (pass++, console.log('  ✓ ' + msg)) : (fail++
   r = await complete.handler(ev({ jobId: 9 }));
   ok(r.statusCode === 200, 'returns 200');
   ok(state.transfers.length === 2, 'two transfers');
-  ok(state.transfers[0].args.amount === Math.round(55*100*0.9), 'deposit transfer = 90% of $55 = ' + Math.round(55*100*0.9));
-  ok(state.transfers[1].args.amount === Math.round((220-55)*100*0.9), 'remainder transfer = 90% of $165 = ' + Math.round(165*100*0.9));
+  ok(state.transfers[0].args.amount === net(5500, 0.05), 'deposit transfer = 95% of $55 minus card cost = ' + net(5500, 0.05));
+  ok(state.transfers[1].args.amount === net(16500, 0.05), 'remainder transfer = 95% of $165 minus card cost = ' + net(16500, 0.05));
   ok(state.transfers[0].idem === 'transfer_job_9_deposit' && state.transfers[1].idem === 'transfer_job_9_remainder', 'stable idempotency keys present');
   ok(state.updates.length === 1 && state.updates[0].payment_status === 'transferred', 'marks job transferred');
 
@@ -125,6 +129,35 @@ function ok(cond, msg) { (cond ? (pass++, console.log('  ✓ ' + msg)) : (fail++
   reset({ id: 14, price: 220, deposit_amount: 0, payment_status: null });
   r = await co.handler(ev({ jobId:14, type:'deposit', successUrl:'s', cancelUrl:'c' }));
   ok(r.statusCode === 200 && /cs\//.test(JSON.parse(r.body).url), 'deposit session created');
+
+
+  console.log('\n[complete-job] FOUNDING detailer, under 10 payouts -> 0% fee');
+  reset({ id: 20, price: 220, deposit_amount: 55, deposit_charge_id: 'pi_d', remainder_charge_id: null, payment_status: 'deposit_paid', _acct: 'acct_1', _founding: true });
+  state.job.price = 55; // deposit-only job so no balance owed
+  state.completedCount = 3;
+  r = await complete.handler(ev({ jobId: 20 }));
+  ok(r.statusCode === 200, 'completes successfully');
+  ok(state.transfers.length === 1 && state.transfers[0].args.amount === net(5500, 0), 'transfers 100% minus card cost only (no platform cut)');
+
+  console.log('\n[complete-job] FOUNDING detailer, 10+ payouts -> normal 5% fee');
+  reset({ id: 21, price: 55, deposit_amount: 55, deposit_charge_id: 'pi_d', remainder_charge_id: null, payment_status: 'deposit_paid', _acct: 'acct_1', _founding: true });
+  state.completedCount = 12;
+  r = await complete.handler(ev({ jobId: 21 }));
+  ok(state.transfers.length === 1 && state.transfers[0].args.amount === net(5500, 0.05), 'back to 95% after 10 free jobs');
+
+  console.log('\n[complete-job] remainder with TIP -> tip passes through at 100%');
+  reset({ id: 30, price: 220, deposit_amount: 55, deposit_charge_id: 'pi_d', remainder_charge_id: 'pi_r', payment_status: 'fully_paid', _acct: 'acct_1', tip_amount: 20 });
+  r = await complete.handler(ev({ jobId: 30 }));
+  ok(r.statusCode === 200, 'completes');
+  ok(state.transfers.length === 2, 'two transfers (deposit + remainder)');
+  ok(state.transfers[0].args.amount === net(5500, 0.05), 'deposit transfer untouched by tip');
+  ok(state.transfers[1].args.amount === net(16500, 0.05) + 2000, 'remainder = detailer share of balance + 100% of $20 tip (tip never touched by fees)');
+
+  console.log('\n[complete-job] PRO non-founding -> 97%');
+  reset({ id: 22, price: 55, deposit_amount: 55, deposit_charge_id: 'pi_d', remainder_charge_id: null, payment_status: 'deposit_paid', _acct: 'acct_1', _pro: true });
+  r = await complete.handler(ev({ jobId: 22 }));
+  ok(state.transfers.length === 1 && state.transfers[0].args.amount === net(5500, 0.03), 'transfers 97% minus card cost for Pro');
+
 
   console.log('\n============================');
   console.log(`RESULT: ${pass} passed, ${fail} failed`);
