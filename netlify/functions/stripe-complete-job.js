@@ -1,8 +1,12 @@
 // Runs when a detailer marks a job "Complete." This is the only place money
-// actually leaves the platform's Stripe balance. It transfers 95% (97% for Pro) of every
-// charge collected for this job (deposit, and remainder if there was one) to
-// the detailer's connected account. The remainder stays behind — that's the
-// platform fee (0% for founding detailers on their first 10 jobs). Refuses to run if a balance is still owed.
+// actually leaves the platform's Stripe balance. It transfers the detailer's
+// share of every charge collected for this job (deposit, and remainder if there
+// was one) to their connected account. What stays behind = the platform fee
+// (0% for founding detailers on their first 10 jobs) + the card-processing
+// cost, which is passed through AT COST (Stripe's own 2.9% + 30¢ per charge —
+// the same thing any Square/Clover card reader charges a detailer). Tips are
+// exempt: they pass through at a true 100%; the platform eats the pennies of
+// processing on tips. Refuses to run if a balance is still owed.
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
@@ -11,6 +15,17 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 // Overridable via env so the rates can change without a code deploy.
 const FEE_FREE = parseFloat(process.env.PLATFORM_FEE_FREE || '0.05');
 const FEE_PRO = parseFloat(process.env.PLATFORM_FEE_PRO || '0.03');
+
+// Card-processing pass-through, at cost (Stripe standard US pricing). If Stripe
+// ever changes its pricing, update via env — no code deploy needed.
+const CARD_PCT = parseFloat(process.env.CARD_FEE_PCT || '0.029');
+const CARD_FIXED = parseInt(process.env.CARD_FEE_FIXED_CENTS || '30', 10);
+
+// Processing cost for one charge of `serviceCents` (tip excluded by callers).
+function processingCents(serviceCents) {
+  if (serviceCents <= 0) return 0;
+  return Math.round(serviceCents * CARD_PCT) + CARD_FIXED;
+}
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -88,7 +103,8 @@ exports.handler = async (event) => {
       if (!chargeId) {
         return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'Deposit payment has not settled yet — try again shortly' }) };
       }
-      const amount = Math.round((job.deposit_amount || 0) * 100 * (1 - PLATFORM_CUT));
+      const depositCents = Math.round((job.deposit_amount || 0) * 100);
+      const amount = Math.max(0, Math.round(depositCents * (1 - PLATFORM_CUT)) - processingCents(depositCents));
       const t = await stripe.transfers.create({
         amount,
         currency: 'usd',
@@ -106,9 +122,11 @@ exports.handler = async (event) => {
       }
       const remainderDollars = job.price - (job.deposit_amount || 0);
       // Tip (if any) was collected on this same charge — it passes through at
-      // 100%; the platform fee only ever applies to the service price.
+      // 100%; the platform fee and card-processing pass-through only ever apply
+      // to the service price, never the tip.
       const tipCents = Math.max(0, Math.round((parseFloat(job.tip_amount) || 0) * 100));
-      const amount = Math.round(remainderDollars * 100 * (1 - PLATFORM_CUT)) + tipCents;
+      const serviceCents = Math.round(remainderDollars * 100);
+      const amount = Math.max(0, Math.round(serviceCents * (1 - PLATFORM_CUT)) - processingCents(serviceCents)) + tipCents;
       const t = await stripe.transfers.create({
         amount,
         currency: 'usd',
