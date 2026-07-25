@@ -72,7 +72,12 @@ exports.handler = async (event) => {
     }
 
     const remainderDue = job.price - (job.deposit_amount || 0);
-    if (remainderDue > 0 && job.payment_status !== 'fully_paid') {
+    // CASH BALANCE: when the customer chose to pay the remainder in cash on
+    // site (jobs.balance_method = 'cash'), the deposit is the only card money
+    // — the detailer collects the rest in person, so completing is allowed
+    // with just the deposit paid. Only the deposit share transfers via Stripe.
+    const cashBalance = job.balance_method === 'cash';
+    if (remainderDue > 0 && job.payment_status !== 'fully_paid' && !cashBalance) {
       return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'The customer still owes a balance on this job — collect that before completing it' }) };
     }
 
