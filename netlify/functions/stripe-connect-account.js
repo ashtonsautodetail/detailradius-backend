@@ -4,13 +4,14 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+const { authUserId, ownsDetailer, unauthorized, forbidden } = require('./_auth');
 
 // Needed because the main site (detailradius.com) and this backend
 // (detailradius-backend.netlify.app) are different origins — without these
 // headers the browser blocks the response before your JS ever sees it.
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
@@ -27,6 +28,13 @@ exports.handler = async (event) => {
     if (!detailerId || !returnUrl) {
       return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'Missing detailerId or returnUrl' }) };
     }
+
+    // AUTH: only the signed-in owner can start/resume payout onboarding for their
+    // own account. Without this, an attacker could onboard someone else's account
+    // to the attacker's bank and hijack all future payouts.
+    const uid = await authUserId(event);
+    if (!uid) return unauthorized(corsHeaders);
+    if (!(await ownsDetailer(detailerId, uid))) return forbidden(corsHeaders);
 
     const { data: detailer, error: fetchErr } = await supabase
       .from('detailers')
@@ -97,6 +105,7 @@ exports.handler = async (event) => {
       };
     }
 
-    return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error: raw, code: 'stripe_error' }) };
+    console.error('stripe-connect-account error:', raw);
+    return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error: 'Couldn’t start payout setup. Please try again.', code: 'stripe_error' }) };
   }
 };

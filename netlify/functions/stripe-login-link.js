@@ -4,10 +4,11 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+const { authUserId, ownsDetailer, unauthorized, forbidden } = require('./_auth');
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
@@ -23,6 +24,11 @@ exports.handler = async (event) => {
     const { detailerId } = JSON.parse(event.body);
     if (!detailerId) return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'Missing detailerId' }) };
 
+    // AUTH: only the detailer who owns this account can open its Stripe dashboard.
+    const uid = await authUserId(event);
+    if (!uid) return unauthorized(corsHeaders);
+    if (!(await ownsDetailer(detailerId, uid))) return forbidden(corsHeaders);
+
     const { data: detailer, error } = await supabase
       .from('detailers')
       .select('stripe_account_id')
@@ -37,6 +43,6 @@ exports.handler = async (event) => {
     return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ url: loginLink.url }) };
   } catch (err) {
     console.error('stripe-login-link error:', err);
-    return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error: err.message }) };
+    return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error: 'Something went wrong. Please try again.' }) };
   }
 };

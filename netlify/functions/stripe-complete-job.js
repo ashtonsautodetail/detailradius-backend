@@ -10,6 +10,7 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+const { authUserId, unauthorized, forbidden } = require('./_auth');
 
 // Plan-based platform fee: free detailers keep 95%, Pro members keep 97%.
 // Overridable via env so the rates can change without a code deploy.
@@ -46,23 +47,36 @@ exports.handler = async (event) => {
     return { statusCode: 405, headers: corsHeaders, body: JSON.stringify({ error: 'Method not allowed' }) };
   }
 
+  // Hoisted so the catch block can revert the payout claim on failure.
+  let jobId, priorStatus;
   try {
-    const { jobId } = JSON.parse(event.body);
+    ({ jobId } = JSON.parse(event.body));
     if (!jobId) return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'Missing jobId' }) };
 
     const { data: job, error } = await supabase
       .from('jobs')
-      .select('*, detailers(stripe_account_id, pro, founding)')
+      .select('*, detailers(stripe_account_id, pro, founding, user_id)')
       .eq('id', jobId)
       .single();
 
     if (error || !job) return { statusCode: 404, headers: corsHeaders, body: JSON.stringify({ error: 'Job not found' }) };
+
+    // AUTH (money-safety): only the detailer who owns this job can complete it and
+    // release its payout. Without this, anyone could POST a guessed jobId and move
+    // money / force-close jobs across the whole marketplace.
+    const uid = await authUserId(event);
+    if (!uid) return unauthorized(corsHeaders);
+    if (!job.detailers || job.detailers.user_id !== uid) return forbidden(corsHeaders);
 
     // IDEMPOTENCY GUARD (money-safety): if this job has already paid out, never run
     // the transfers again. Without this, a double-click or a retry would attempt to
     // pay the detailer a second time. Combined with the idempotency keys below, a
     // payout for a given job can happen at most once.
     if (job.payment_status === 'transferred') {
+      return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ success: true, alreadyCompleted: true, transferIds: [] }) };
+    }
+    if (job.payment_status === 'transferring') {
+      // Another request is mid-payout for this job right now — don't run a second.
       return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ success: true, alreadyCompleted: true, transferIds: [] }) };
     }
 
@@ -99,6 +113,26 @@ exports.handler = async (event) => {
         .eq('detailer_id', job.detailer_id)
         .eq('payment_status', 'transferred');
       if ((count || 0) < 10) PLATFORM_CUT = 0;
+    }
+
+    // CLAIM THE JOB (money-safety): atomically flip payment_status to
+    // 'transferring' only if it's still the value we read. If another concurrent
+    // request already claimed it, 0 rows change and we bail — this closes the
+    // check-then-act race that the per-charge idempotency keys can't cover after
+    // their ~24h window expires.
+    priorStatus = job.payment_status;
+    const { data: claimed, error: claimErr } = await supabase
+      .from('jobs')
+      .update({ payment_status: 'transferring' })
+      .eq('id', jobId)
+      .eq('payment_status', priorStatus)
+      .select('id');
+    if (claimErr) {
+      return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error: 'Couldn’t start the payout. Please try again.' }) };
+    }
+    if (!claimed || claimed.length === 0) {
+      // Someone else claimed it between our read and write.
+      return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ success: true, alreadyCompleted: true, transferIds: [] }) };
     }
 
     const transferIds = [];
@@ -148,12 +182,23 @@ exports.handler = async (event) => {
       .eq('id', jobId);
 
     if (updateErr) {
-      return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error: 'Transfer succeeded but failed to update job status: ' + updateErr.message, transferIds }) };
+      // Transfers succeeded but the final status write failed. Leave the row in
+      // 'transferring' (NOT reverted) so a retry won't re-transfer — the payout
+      // already happened; this needs manual reconciliation, logged for the owner.
+      console.error('stripe-complete-job: payout done but status write failed for job', jobId, updateErr.message, 'transfers:', transferIds.join(','));
+      return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error: 'Your payout was sent, but we hit a snag updating the job. It’s recorded — refresh in a moment.', transferIds }) };
     }
 
     return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ success: true, transferIds }) };
   } catch (err) {
-    console.error('stripe-complete-job error:', err);
-    return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error: err.message }) };
+    console.error('stripe-complete-job error:', err && err.message);
+    // A transfer threw. Revert our claim so the detailer can safely retry — the
+    // per-charge idempotency keys guarantee no charge is transferred twice.
+    try {
+      if (jobId && priorStatus) {
+        await supabase.from('jobs').update({ payment_status: priorStatus }).eq('id', jobId).eq('payment_status', 'transferring');
+      }
+    } catch (e) { /* best effort */ }
+    return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error: 'Couldn’t complete the payout just now. Please try again in a moment.' }) };
   }
 };

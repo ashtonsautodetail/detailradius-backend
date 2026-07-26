@@ -6,10 +6,11 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+const { authUserId, ownsDetailer } = require('./_auth');
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 const respond = (code, body) => ({ statusCode: code, headers: corsHeaders, body: JSON.stringify(body) });
@@ -21,6 +22,11 @@ exports.handler = async (event) => {
   try {
     const { action, detailerId, sessionId, successUrl, cancelUrl } = JSON.parse(event.body || '{}');
     if (!detailerId) return respond(400, { error: 'Missing detailerId' });
+
+    // AUTH: only the signed-in owner can create/verify/read their own Pro state.
+    const uid = await authUserId(event);
+    if (!uid) return respond(401, { error: 'Please sign in again to continue.' });
+    if (!(await ownsDetailer(detailerId, uid))) return respond(403, { error: 'You don’t have access to that.' });
 
     const { data: detailer, error } = await supabase
       .from('detailers')

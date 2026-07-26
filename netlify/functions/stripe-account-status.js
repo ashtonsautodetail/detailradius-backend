@@ -5,10 +5,11 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+const { authUserId, ownsDetailer, unauthorized, forbidden } = require('./_auth');
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
@@ -25,6 +26,11 @@ exports.handler = async (event) => {
     if (!detailerId) {
       return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'Missing detailerId' }) };
     }
+
+    // AUTH: a detailer's onboarding status is owner-only (blocks enumeration).
+    const uid = await authUserId(event);
+    if (!uid) return unauthorized(corsHeaders);
+    if (!(await ownsDetailer(detailerId, uid))) return forbidden(corsHeaders);
 
     const { data: detailer, error } = await supabase
       .from('detailers')

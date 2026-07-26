@@ -55,7 +55,7 @@ exports.handler = async (event) => {
       if (remainderDollars <= 0) {
         return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'No balance due on this job' }) };
       }
-      amountCents = remainderDollars * 100;
+      amountCents = Math.round(remainderDollars * 100);   // avoid float cents Stripe rejects
       description = `Balance due — ${job.service} (${job.vehicle})`;
       // Optional tip chosen by the customer (jobs.tip_amount, written by the
       // frontend right before this call). Tips ride as their own line item and
